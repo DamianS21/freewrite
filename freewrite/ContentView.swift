@@ -85,7 +85,15 @@ struct ContentView: View {
     @State private var colorScheme: ColorScheme = .light // Add state for color scheme
     @State private var isHoveringThemeToggle = false // Add state for theme toggle hover
     @State private var didCopyPrompt: Bool = false // Add state for copy prompt feedback
+    @State private var isHoveringPersonaIcon = false
+    @State private var showIdentityPrompt = false
+    @State private var identityInput: String = ""
+    @State private var identityTimerRemaining: Int = 300
+    @State private var identityTimerIsRunning = false
+    @AppStorage("userIdentity") private var storedUserIdentity: String = ""
+    @FocusState private var identityFieldIsFocused: Bool
     let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    let identityTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     let entryHeight: CGFloat = 40
     
     let availableFonts = NSFontManager.shared.availableFontFamilies
@@ -124,7 +132,7 @@ struct ContentView: View {
     }()
     
     // Add shared prompt constant
-    private let aiChatPrompt = """
+    private let baseAIChatPrompt = """
     below is my journal entry. wyt? talk through it with me like a friend. don't therpaize me and give me a whole breakdown, don't repeat my thoughts with headings. really take all of this, and tell me back stuff truly as if you're an old homie.
     
     Keep it casual, dont say yo, help me make new connections i don't see, comfort, validate, challenge, all of it. dont be afraid to say a lot. format with markdown headings if needed.
@@ -134,11 +142,9 @@ struct ContentView: View {
     ideally, you're style/tone should sound like the user themselves. it's as if the user is hearing their own tone but it should still feel different, because you have different things to say and don't just repeat back they say.
 
     else, start by saying, "hey, thanks for showing me this. my thoughts:"
-        
-    my entry:
     """
     
-    private let claudePrompt = """
+    private let baseClaudePrompt = """
     Take a look at my journal entry below. I'd like you to analyze it and respond with deep insight that feels personal, not clinical.
     Imagine you're not just a friend, but a mentor who truly gets both my tech background and my psychological patterns. I want you to uncover the deeper meaning and emotional undercurrents behind my scattered thoughts.
     Keep it casual, dont say yo, help me make new connections i don't see, comfort, validate, challenge, all of it. dont be afraid to say a lot. format with markdown headings if needed.
@@ -146,10 +152,40 @@ struct ContentView: View {
     Don't just validate my thoughts - reframe them in a way that shows me what I'm really seeking beneath the surface. Go beyond the product concepts to the emotional core of what I'm trying to solve.
     Be willing to be profound and philosophical without sounding like you're giving therapy. I want someone who can see the patterns I can't see myself and articulate them in a way that feels like an epiphany.
     Start with 'hey, thanks for showing me this. my thoughts:' and then use markdown headings to structure your response.
+    """
 
+    private let aiPromptEntryHeader = """
+    my entry:
+    """
+
+    private let claudePromptEntryHeader = """
     Here's my journal entry:
     """
     
+    private var aiChatPrompt: String {
+        var prompt = baseAIChatPrompt
+        let trimmedIdentity = storedUserIdentity.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !trimmedIdentity.isEmpty {
+            prompt += "\n\nabout the writer:\n\(trimmedIdentity)"
+        }
+
+        prompt += "\n\n" + aiPromptEntryHeader
+        return prompt
+    }
+
+    private var claudePrompt: String {
+        var prompt = baseClaudePrompt
+        let trimmedIdentity = storedUserIdentity.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !trimmedIdentity.isEmpty {
+            prompt += "\n\nAdditional context about the writer:\n\(trimmedIdentity)"
+        }
+
+        prompt += "\n\n" + claudePromptEntryHeader
+        return prompt
+    }
+
     // Initialize with saved theme preference if available
     init() {
         // Load saved color scheme preference
@@ -349,7 +385,17 @@ struct ContentView: View {
         let seconds = timeRemaining % 60
         return String(format: "%d:%02d", minutes, seconds)
     }
-    
+
+    var identityTimerLabel: String {
+        let minutes = identityTimerRemaining / 60
+        let seconds = identityTimerRemaining % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    var personaHasText: Bool {
+        !identityInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var timerColor: Color {
         if timerIsRunning {
             return isHoveringTimer ? (colorScheme == .light ? .black : .white) : .gray.opacity(0.8)
@@ -576,6 +622,29 @@ struct ContentView: View {
                         
                         // Utility buttons (moved to right)
                         HStack(spacing: 8) {
+                            Button(action: {
+                                identityInput = storedUserIdentity
+                                identityTimerRemaining = 300
+                                identityTimerIsRunning = true
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    showIdentityPrompt = true
+                                }
+                            }) {
+                                Image(systemName: "person.crop.circle")
+                                    .foregroundColor(isHoveringPersonaIcon ? textHoverColor : textColor)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Edit persona")
+                            .onHover { hovering in
+                                isHoveringPersonaIcon = hovering
+                                isHoveringBottomNav = hovering
+                                if hovering {
+                                    NSCursor.pointingHand.push()
+                                } else {
+                                    NSCursor.pop()
+                                }
+                            }
+
                             Button(timerButtonTitle) {
                                 let now = Date()
                                 if let lastClick = lastClickTime,
@@ -1036,9 +1105,120 @@ struct ContentView: View {
         .frame(minWidth: 1100, minHeight: 600)
         .animation(.easeInOut(duration: 0.2), value: showingSidebar)
         .preferredColorScheme(colorScheme)
+        .overlay(
+            Group {
+                if showIdentityPrompt {
+                    ZStack {
+                        Color(colorScheme == .light ? .white : .black)
+                            .ignoresSafeArea()
+
+                        VStack(spacing: 32) {
+                            Spacer()
+
+                            VStack(spacing: personaHasText ? 24 : 32) {
+                                HStack(alignment: .firstTextBaseline) {
+                                    if !personaHasText {
+                                        VStack(alignment: .leading, spacing: 10) {
+                                            Text("Tell us who you are")
+                                                .font(.system(size: 30, weight: .semibold))
+                                                .foregroundColor(colorScheme == .light ? .black : .white)
+
+                                            Text("Share a quick note so every chat feels personal.")
+                                                .font(.system(size: 15))
+                                                .foregroundColor(colorScheme == .light ? .gray : .gray.opacity(0.75))
+                                        }
+                                        .transition(.move(edge: .top).combined(with: .opacity))
+                                    }
+
+                                    Spacer()
+
+                                    Text(identityTimerLabel)
+                                        .font(.system(size: 18, weight: .medium, design: .monospaced))
+                                        .foregroundColor(colorScheme == .light ? .black : .white)
+                                        .padding(.horizontal, 18)
+                                        .padding(.vertical, 8)
+                                        .background(
+                                            Capsule()
+                                                .fill(colorScheme == .light ? Color.black.opacity(0.08) : Color.white.opacity(0.12))
+                                        )
+                                }
+                                .animation(.easeInOut(duration: 0.25), value: personaHasText)
+
+                                ZStack(alignment: .topLeading) {
+                                    TextEditor(text: $identityInput)
+                                        .font(.custom(selectedFont, size: fontSize))
+                                        .foregroundColor(colorScheme == .light ? Color(red: 0.20, green: 0.20, blue: 0.20) : Color(red: 0.9, green: 0.9, blue: 0.9))
+                                        .lineSpacing(lineHeight)
+                                        .scrollIndicators(.never)
+                                        .scrollContentBackground(.hidden)
+                                        .focused($identityFieldIsFocused)
+                                        .frame(maxWidth: 650, minHeight: 360, alignment: .topLeading)
+                                        .background(Color(colorScheme == .light ? .white : .black))
+                                        .colorScheme(colorScheme)
+                                        .onTapGesture {
+                                            identityFieldIsFocused = true
+                                        }
+
+                                    if !personaHasText {
+                                        Text("what do you care about right now, what should your future self remember?")
+                                            .font(.custom(selectedFont, size: fontSize))
+                                            .foregroundColor(colorScheme == .light ? .gray.opacity(0.35) : .gray.opacity(0.55))
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 10)
+                                            .offset(x: 5, y: placeholderOffset)
+                                            .allowsHitTesting(false)
+                                            .transition(.opacity)
+                                    }
+                                }
+                                .animation(.easeInOut(duration: 0.25), value: personaHasText)
+
+                                HStack {
+                                    Spacer()
+
+                                    Button(action: saveIdentity) {
+                                        Text("Save & Start Writing")
+                                            .font(.system(size: 16, weight: .semibold))
+                                            .padding(.horizontal, 24)
+                                            .padding(.vertical, 12)
+                                            .background(
+                                                Capsule()
+                                                    .fill(personaHasText ? (colorScheme == .light ? Color.black : Color.white) : Color.gray.opacity(0.25))
+                                            )
+                                            .foregroundColor(colorScheme == .light ? .white : .black)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(!personaHasText)
+                                }
+                                .frame(maxWidth: 700)
+                                .animation(.easeInOut(duration: 0.2), value: personaHasText)
+                            }
+                            .padding(.horizontal, 48)
+
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            identityFieldIsFocused = true
+                        }
+                    }
+                    .transition(.opacity)
+                }
+            }
+        )
         .onAppear {
             showingSidebar = false  // Hide sidebar by default
             loadExistingEntries()
+
+            let trimmedIdentity = storedUserIdentity.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedIdentity.isEmpty {
+                identityInput = ""
+                identityTimerRemaining = 300
+                identityTimerIsRunning = true
+                showIdentityPrompt = true
+            } else {
+                identityInput = trimmedIdentity
+                identityTimerIsRunning = false
+            }
         }
         .onChange(of: text) { _ in
             // Save current entry when text changes
@@ -1057,6 +1237,23 @@ struct ContentView: View {
                         bottomNavOpacity = 1.0
                     }
                 }
+            }
+        }
+        .onReceive(identityTimer) { _ in
+            guard showIdentityPrompt, identityTimerIsRunning else { return }
+            if identityTimerRemaining > 0 {
+                identityTimerRemaining -= 1
+            } else {
+                identityTimerIsRunning = false
+            }
+        }
+        .onChange(of: showIdentityPrompt) { isPresented in
+            if isPresented {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    identityFieldIsFocused = true
+                }
+            } else {
+                identityFieldIsFocused = false
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.willEnterFullScreenNotification)) { _ in
@@ -1149,7 +1346,20 @@ struct ContentView: View {
             saveEntry(entry: newEntry)
         }
     }
-    
+
+    private func saveIdentity() {
+        let trimmed = identityInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        storedUserIdentity = trimmed
+        identityInput = trimmed
+        identityTimerIsRunning = false
+        identityFieldIsFocused = false
+        withAnimation(.easeInOut(duration: 0.2)) {
+            showIdentityPrompt = false
+        }
+    }
+
     private func openChatGPT() {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let fullText = aiChatPrompt + "\n\n" + trimmedText
